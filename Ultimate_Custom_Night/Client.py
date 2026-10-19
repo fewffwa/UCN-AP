@@ -1,4 +1,5 @@
 from asyncio import Task
+from pathlib import PureWindowsPath, PurePosixPath
 from typing import Dict, List
 
 import bsdiff4
@@ -10,31 +11,39 @@ from .Items import trap_ids, item_data_table
 from .Locations import location_table, secret_scares
 from CommonClient import *
 
+from Utils import is_windows
+from settings import get_settings
+
 class UCNCommandProcessor(ClientCommandProcessor):
     def __init__(self, ctx: CommonContext):
         super().__init__(ctx)
 
     def _cmd_patch(self):
         """Patches the game"""
-        game_path = os.path.join(os.getcwd(), "UCN")
-        with open(os.path.join(game_path, "Ultimate Custom Night.exe"), "rb") as file:
+
+        game_path = get_settings()['ucn_options']['game_path']
+        with open(game_path, "rb") as file:
             patched_exe = bsdiff4.patch(file.read(), get_patch())
-        with open(os.path.join(game_path, "UCN Archipelago.exe"), "wb") as file:
+        with open(os.path.join(os.path.dirname(game_path), "UCN Archipelago.exe"), "wb") as file:
             file.write(patched_exe)
 
         self.output("Successfully patched UCN!")
 
-    def _cmd_set_path(self, directory: str):
-        """Redirect to proper save data folder. Use this command if you're not on Windows before connecting!"""
-        if "CNAP" in directory and directory != "":
-            self.ctx.save_path = directory[::-5]
-        else:
-            self.ctx.save_path = directory
-        self.output(f"Changed to the following directory: {self.ctx.save_path}")
+    def _cmd_change_save_path(self):
+        """Change Save Path"""
+        save_path = get_settings()['ucn_options']['save_path'].browse()
+        get_settings()['ucn_options']['save_path'] = save_path
+        self.output(f"Changed to the following directory: {save_path}")
+
+    def _cmd_change_game_path(self):
+        """Change Game Path"""
+        game_path = get_settings()['ucn_options']['game_path'].browse()
+        get_settings()['ucn_options']['game_path'] = game_path
+        self.output(f"Changed to the following file: {game_path}")
 
     def _cmd_check_path(self):
         """Check current save data folder. (Use before connecting!)"""
-        self.output(f"Current save path: {self.ctx.save_path}")
+        self.output(f"Current save path: {get_settings()['ucn_options']}")
 
     def _cmd_resync(self):
         """Resync your client with the server. (Use if items didn't get added to game, or checks stop being sent. Items are only added if they aren't traps or filler)"""
@@ -46,7 +55,6 @@ class UCNContext(CommonContext):
     game = "Ultimate Custom Night"
     items_handling = 0b111  # recieve all items
     command_processor = UCNCommandProcessor
-    save_path = ""
     last_scare = ""
     deahlink_start = False
 
@@ -69,8 +77,22 @@ class UCNContext(CommonContext):
 
         self.notifications_inqueue: Dict[str, str] = {}
 
-        if platform.system() == "Windows":
-            self.save_path = os.path.expandvars(r"%APPDATA%\MMFApplications")
+        if not is_windows:
+            save_path = get_settings()['ucn_options']['save_path']
+            is_windows_path = len(PureWindowsPath(save_path).parts) > len(PurePosixPath(save_path).parts)
+            if is_windows_path:
+                get_settings()['ucn_options']['save_path'] = '.steam/steam/steamapps/compatdata/871720/pfx/drive_c/users/steamuser/AppData/Roaming/MMFApplications'
+
+            game_path = get_settings()['ucn_options']['game_path']
+            is_windows_path = len(PureWindowsPath(game_path).parts) > len(PurePosixPath(game_path).parts)
+            if is_windows_path:
+                get_settings()['ucn_options']['game_path'] = '.steam/steam/steamapps/common/Ultimate Custom Night/Ultimate Custom Night.exe'
+
+        save_path = get_settings()['ucn_options']['save_path']
+        get_settings()['ucn_options']['save_path'] = os.path.abspath(save_path)
+
+        game_path = get_settings()['ucn_options']['game_path']
+        get_settings()['ucn_options']['game_path'] = os.path.abspath(game_path)
 
         self.last_save_time = 0
         self.save_task = asyncio.create_task(self.save_watcher(), name="save_watcher")
@@ -86,7 +108,7 @@ class UCNContext(CommonContext):
     def on_package(self, cmd, args):
         # Called for every packet after base handling
         if cmd == "Connected":
-            if self.save_path == "":
+            if get_settings()['ucn_options']['save_path'] == "":
                 raise FileNotFoundError("Save path not set before connecting, use the 'set_path' command and try again")
 
             self.target_points = args["slot_data"]["target_points"]
@@ -129,7 +151,7 @@ class UCNContext(CommonContext):
     # watches the save file
     async def save_watcher(self):
         while not self.exit_event.is_set():
-            path = f"{self.save_path}/CNAP"
+            path = f"{get_settings()['ucn_options']['save_path']}/CNAP"
             if os.path.exists(path):
                 mtime = os.path.getmtime(path)
                 if self.just_connected or mtime != self.last_save_time:
@@ -240,7 +262,7 @@ class UCNContext(CommonContext):
                 await self.send_msgs([{"cmd": "StatusUpdate", "status": ClientStatus.CLIENT_GOAL}])
                 self.finished_game = True
 
-            self.last_save_time = os.path.getmtime(f"{self.save_path}/CNAP")
+            self.last_save_time = os.path.getmtime(f"{get_settings()['ucn_options']['save_path']}/CNAP")
 
     async def queue_received_traps(self):
         content = self.read_save()
@@ -275,7 +297,7 @@ class UCNContext(CommonContext):
             while True:
                 try:
                     if new_item:
-                        with open(f"{self.save_path}/{file}", 'a') as fa:
+                        with open(f"{get_settings()['ucn_options']['save_path']}/{file}", 'a') as fa:
                             fa.write(f"\n{game_id}={new_value}")
                             item_handled = True
                     elif file == "CNAP" and (len(ucn_save) < 3 or "ep=13" not in ucn_save[2]):
@@ -283,7 +305,7 @@ class UCNContext(CommonContext):
                         self.resync()
                         break
                     else:
-                        with open(f"{self.save_path}/{file}", 'w') as fw:
+                        with open(f"{get_settings()['ucn_options']['save_path']}/{file}", 'w') as fw:
                             fw.write("\n".join(ucn_save))
                             item_handled = True
 
@@ -311,7 +333,7 @@ class UCNContext(CommonContext):
     def load_client_save(self, args):
         while True:
             try:
-                with open(f"{self.save_path}/CNAPClient", 'r') as f:
+                with open(f"{get_settings()['ucn_options']['save_path']}/CNAPClient", 'r') as f:
                     lines = [line.rstrip() for line in f.readlines()]
                 break
             except PermissionError:
@@ -320,7 +342,7 @@ class UCNContext(CommonContext):
                 self.reset_saves(args)
                 return
 
-        if not os.path.exists(f"{self.save_path}/CNAP"):
+        if not os.path.exists(f"{get_settings()['ucn_options']['save_path']}/CNAP"):
             self.reset_saves(args)
             return
 
@@ -348,7 +370,7 @@ class UCNContext(CommonContext):
     def reset_game_save(self):
         while True:
             try:
-                with open(f"{self.save_path}/CNAP", 'w') as f:
+                with open(f"{get_settings()['ucn_options']['save_path']}/CNAP", 'w') as f:
                     # ep=13: only the golden freddy cutscene plays at 9800 hs, adjust=1: skips adjust volume screen
                     f.write("[CNAP]\n"
                             "hs=0\n"
@@ -357,7 +379,7 @@ class UCNContext(CommonContext):
                             f"targetpoints={self.target_points}")
                     
                 if self.deathlink_active:
-                    with open(f"{self.save_path}/CNAP", 'a') as f:
+                    with open(f"{get_settings()['ucn_options']['save_path']}/CNAP", 'a') as f:
                         f.write("\ndeathlinkactive=1")
                 break
             except PermissionError:
@@ -366,7 +388,7 @@ class UCNContext(CommonContext):
     def reset_client_save(self, args):
         while True:
             try:
-                with open(f"{self.save_path}/CNAPClient", 'w') as f:
+                with open(f"{get_settings()['ucn_options']['save_path']}/CNAPClient", 'w') as f:
                     f.write(f"seed_id={args["slot_data"]["seed_identifier"]}")
                 break
             except PermissionError:
@@ -374,7 +396,7 @@ class UCNContext(CommonContext):
 
     def read_save(self, file="CNAP") -> List[str] | None:
         try:
-            with open(f"{self.save_path}/{file}", 'r') as fr:
+            with open(f"{get_settings()['ucn_options']['save_path']}/{file}", 'r') as fr:
                 save = [line.rstrip() for line in fr.readlines()]
             return save
         except PermissionError:
@@ -403,7 +425,8 @@ def get_animatronic_name(scare_id) -> str:
 
 def get_patch():
     import pkgutil
-    return pkgutil.get_data(__name__, "/patch/UCNAP.bsdiff")
+    patch_name = 'Gamejolt.Patch.bsdiff' if get_settings()['ucn_options']['game_path'].is_gamejolt else 'UCNAP.bsdiff'
+    return pkgutil.get_data(__name__, f"/patch/{patch_name}")
 
 
 def main():
